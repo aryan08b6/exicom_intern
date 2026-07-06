@@ -1,0 +1,26 @@
+# Build output
+Debug/
+Release/
+
+# STM32CubeIDE generated settings
+.settings/
+
+# Eclipse metadata
+.metadata/
+
+# User-specific launch configurations
+*.launch
+
+# Temporary files
+*.o
+*.d
+*.su
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+
+# OS files
+.DS_Store
+Thumbs.db
