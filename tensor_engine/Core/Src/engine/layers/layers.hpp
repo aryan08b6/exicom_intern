@@ -1,19 +1,18 @@
-/*
- * layers.hpp
- *
- *  Created on: Jul 6, 2026
- *      Author: aryan
- */
+#ifndef ENGINE_LAYERS_HPP_
+#define ENGINE_LAYERS_HPP_
 
-#include "matrix_mul.hpp"
+#include <cstring>
+#include <cmath>
+#include <cstdlib>
+#include <vector>
+#include "../array_api/array_api.hpp"
+#include "../ops/ops.hpp"
 
-#ifndef SRC_ENGINE_LAYERS_HPP_
-#define SRC_ENGINE_LAYERS_HPP_
+namespace engine {
 
 class Layer {
 public:
     virtual ~Layer() {}
-    // The training flag indicates whether to cache values for backprop or use inference mode
     virtual Matrix* forward(Matrix* input, bool training) = 0;
     virtual Matrix* backward(Matrix* dY) = 0;
     virtual void update(float lr) = 0;
@@ -22,74 +21,75 @@ public:
 class LinearLayer : public Layer {
 private:
     int in_features, out_features;
+    DataType dtype;
     Matrix *W, *b, *dW, *db;
+    memory::WeightBuffer* weight_storage;
     Matrix *cached_input;
 
 public:
-    LinearLayer(int in_f, int out_f) : in_features(in_f), out_features(out_f) {
+    LinearLayer(int in_f, int out_f, DataType type = DataType::FLOAT32)
+        : in_features(in_f), out_features(out_f), dtype(type) {
         W = new Matrix(in_features, out_features);
         b = new Matrix(1, out_features);
         dW = new Matrix(in_features, out_features);
         db = new Matrix(1, out_features);
         cached_input = nullptr;
 
-        // Initialization heuristic optimized for LeakyReLU
         float limit = sqrt(2.0f / in_features);
         for(int i = 0; i < in_features * out_features; ++i) {
             W->data[i] = ((float)rand() / RAND_MAX) * 2 * limit - limit;
         }
         for(int i = 0; i < out_features; ++i) b->data[i] = 0.0f;
+
+        weight_storage = new memory::WeightBuffer(dtype, in_features * out_features, 0.01f, 0);
+        weight_storage->pack_from_float(W->data, in_features * out_features);
     }
 
-    ~LinearLayer() {
+    ~LinearLayer() override {
         delete W; delete b; delete dW; delete db;
+        delete weight_storage;
         if(cached_input) delete cached_input;
     }
+
+    DataType get_dtype() const { return dtype; }
 
     Matrix* forward(Matrix* input, bool training) override {
         if(cached_input) delete cached_input;
-
-        // Deep copy the input matrix required for dW computation later
         cached_input = new Matrix(input->rows, input->cols);
         memcpy(cached_input->data, input->data, input->rows * input->cols * sizeof(float));
 
+        if (dtype != DataType::FLOAT32) {
+            weight_storage->unpack_to_float(W->data, in_features * out_features);
+        }
+
         Matrix* output = new Matrix(input->rows, out_features);
         matmul(input, W, output);
-
-        // Affine bias addition
-        for(int i = 0; i < output->rows; ++i) {
-            for(int j = 0; j < output->cols; ++j) {
-                output->set(i, j, output->get(i, j) + b->get(0, j));
-            }
-        }
+        add_bias(output, b);
         return output;
     }
 
     Matrix* backward(Matrix* dZ) override {
-        // Gradient wrt Weights: dW = X^T * dZ
         matmul_AT_B(cached_input, dZ, dW);
 
-        // Gradient wrt Biases: db = sum(dZ, axis=0)
         for(int j = 0; j < out_features; ++j) {
-            float sum = 0;
+            float sum = 0.0f;
             for(int i = 0; i < dZ->rows; ++i) sum += dZ->get(i, j);
             db->set(0, j, sum);
         }
 
-        // Gradient wrt Input: dX = dZ * W^T
         Matrix* dX = new Matrix(cached_input->rows, in_features);
         matmul_A_BT(dZ, W, dX);
         return dX;
     }
 
     void update(float lr) override {
-        // Standard Stochastic Gradient Descent (SGD) parameter update
         for(int i = 0; i < in_features * out_features; ++i) {
             W->data[i] -= lr * dW->data[i];
         }
         for(int i = 0; i < out_features; ++i) {
             b->data[i] -= lr * db->data[i];
         }
+        weight_storage->pack_from_float(W->data, in_features * out_features);
     }
 };
 
@@ -99,8 +99,6 @@ private:
     float eps, momentum;
     Matrix *gamma, *beta, *dgamma, *dbeta;
     Matrix *running_mean, *running_var;
-
-    // Gradient computation caches
     Matrix *cached_x_hat, *cached_var;
     int last_batch_size;
 
@@ -113,7 +111,6 @@ public:
         dbeta = new Matrix(1, features);
         running_mean = new Matrix(1, features);
         running_var = new Matrix(1, features);
-
         cached_x_hat = nullptr;
         cached_var = nullptr;
 
@@ -125,7 +122,7 @@ public:
         }
     }
 
-    ~BatchNorm1dLayer() {
+    ~BatchNorm1dLayer() override {
         delete gamma; delete beta; delete dgamma; delete dbeta;
         delete running_mean; delete running_var;
         if(cached_x_hat) delete cached_x_hat;
@@ -155,8 +152,6 @@ public:
                 }
                 var /= N;
                 cached_var->set(0, j, var);
-
-                // Exponential moving average for inference
                 running_mean->set(0, j, (1 - momentum) * running_mean->get(0, j) + momentum * mean);
                 running_var->set(0, j, (1 - momentum) * running_var->get(0, j) + momentum * var);
 
@@ -168,7 +163,6 @@ public:
                 }
             }
         } else {
-            // Edge Deployment Inference Mode utilizing running statistics
             for (int j = 0; j < num_features; ++j) {
                 float mean = running_mean->get(0, j);
                 float var = running_var->get(0, j);
@@ -195,10 +189,8 @@ public:
             for (int i = 0; i < N; ++i) {
                 float dy_ij = dY->get(i, j);
                 float x_hat_ij = cached_x_hat->get(i, j);
-
                 dgamma_val += dy_ij * x_hat_ij;
                 dbeta_val += dy_ij;
-
                 float dXhat_ij = dy_ij * gamma->get(0, j);
                 sum_dXhat += dXhat_ij;
                 sum_dXhat_Xhat += dXhat_ij * x_hat_ij;
@@ -207,7 +199,6 @@ public:
             dgamma->set(0, j, dgamma_val);
             dbeta->set(0, j, dbeta_val);
 
-            // Applying the optimized, mathematically stabilized dX algebraic derivation
             float inv_std = 1.0f / sqrt(cached_var->get(0, j) + eps);
             for (int i = 0; i < N; ++i) {
                 float dXhat_ij = dY->get(i, j) * gamma->get(0, j);
@@ -217,6 +208,7 @@ public:
                 dX->set(i, j, dx_ij);
             }
         }
+
         return dX;
     }
 
@@ -235,40 +227,26 @@ private:
 
 public:
     LeakyReLULayer(float a = 0.1f) : alpha(a), cached_mask(nullptr) {}
-    ~LeakyReLULayer() { if(cached_mask) delete cached_mask; }
+    ~LeakyReLULayer() override { if(cached_mask) delete cached_mask; }
 
     Matrix* forward(Matrix* input, bool training) override {
         Matrix* output = new Matrix(input->rows, input->cols);
-
         if (training) {
             if(cached_mask) delete cached_mask;
             cached_mask = new Matrix(input->rows, input->cols);
         }
-
-        for(int i = 0; i < input->rows * input->cols; ++i) {
-            float val = input->data[i];
-            if (val > 0) {
-                output->data[i] = val;
-                if (training) cached_mask->data[i] = 1.0f;
-            } else {
-                output->data[i] = alpha * val;
-                if (training) cached_mask->data[i] = alpha;
-            }
-        }
+        apply_leaky_relu(input, output, training ? cached_mask : nullptr, alpha);
         return output;
     }
 
     Matrix* backward(Matrix* dZ) override {
         Matrix* dX = new Matrix(dZ->rows, dZ->cols);
-        for(int i = 0; i < dZ->rows * dZ->cols; ++i) {
-            dX->data[i] = dZ->data[i] * cached_mask->data[i]; // Element-wise masking
-        }
+        leaky_relu_backward(dZ, cached_mask, dX);
         return dX;
     }
 
-    void update(float lr) override { /* No learnable parameters present */ }
+    void update(float lr) override {}
 };
-
 
 class DropoutLayer : public Layer {
 private:
@@ -277,28 +255,15 @@ private:
 
 public:
     DropoutLayer(float drop_prob = 0.2f) : p(drop_prob), cached_mask(nullptr) {}
-    ~DropoutLayer() { if(cached_mask) delete cached_mask; }
+    ~DropoutLayer() override { if(cached_mask) delete cached_mask; }
 
     Matrix* forward(Matrix* input, bool training) override {
         Matrix* output = new Matrix(input->rows, input->cols);
-
         if (training) {
             if(cached_mask) delete cached_mask;
             cached_mask = new Matrix(input->rows, input->cols);
-
-            float scale = 1.0f / (1.0f - p);
-            for(int i = 0; i < input->rows * input->cols; ++i) {
-                float rand_val = (float)rand() / RAND_MAX;
-                if (rand_val >= p) {
-                    cached_mask->data[i] = scale;
-                    output->data[i] = input->data[i] * scale;
-                } else {
-                    cached_mask->data[i] = 0.0f;
-                    output->data[i] = 0.0f;
-                }
-            }
+            apply_dropout(input, output, cached_mask, p);
         } else {
-            // Identity function mechanism deployed during MCU inference
             memcpy(output->data, input->data, input->rows * input->cols * sizeof(float));
         }
         return output;
@@ -306,65 +271,60 @@ public:
 
     Matrix* backward(Matrix* dY) override {
         Matrix* dX = new Matrix(dY->rows, dY->cols);
-        for(int i = 0; i < dY->rows * dY->cols; ++i) {
-            dX->data[i] = dY->data[i] * cached_mask->data[i];
-        }
+        dropout_backward(dY, cached_mask, dX);
         return dX;
     }
 
-    void update(float lr) override { /* No learnable parameters present */ }
+    void update(float lr) override {}
 };
 
-
-class AdvancedPowerPredictor {
+// Sequential container layer (Needle framework style)
+class SequentialLayer : public Layer {
 private:
-    Layer* layers[9];
-    int num_layers;
+    std::vector<Layer*> layers;
 
 public:
-    AdvancedPowerPredictor() {
-        num_layers = 9;
-        layers[0] = new LinearLayer(5, 32);
-        layers[1] = new BatchNorm1dLayer(32);
-        layers[2] = new LeakyReLULayer(0.1f);
-        layers[3] = new DropoutLayer(0.2f);
-
-        layers[4] = new LinearLayer(32, 16);
-        layers[5] = new BatchNorm1dLayer(16);
-        layers[6] = new LeakyReLULayer(0.1f);
-        layers[7] = new DropoutLayer(0.2f);
-
-        layers[8] = new LinearLayer(16, 1);
+    SequentialLayer() {}
+    ~SequentialLayer() override {
+        for (size_t i = 0; i < layers.size(); ++i) {
+            delete layers[i];
+        }
     }
 
-    ~AdvancedPowerPredictor() {
-        for(int i = 0; i < num_layers; ++i) delete layers[i];
+    void add(Layer* layer) {
+        layers.push_back(layer);
     }
 
-    Matrix* forward(Matrix* X, bool training) {
+    size_t size() const { return layers.size(); }
+
+    Matrix* forward(Matrix* X, bool training) override {
         Matrix* current_out = X;
-        for(int i = 0; i < num_layers; ++i) {
+        for (size_t i = 0; i < layers.size(); ++i) {
             Matrix* next_out = layers[i]->forward(current_out, training);
-            // Systematically free intermediate matrices to prevent hard-faults
             if (i > 0) delete current_out;
             current_out = next_out;
         }
         return current_out;
     }
 
-    void backward(Matrix* dY) {
+    Matrix* backward(Matrix* dY) override {
         Matrix* current_grad = dY;
-        for(int i = num_layers - 1; i >= 0; --i) {
+        for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
             Matrix* next_grad = layers[i]->backward(current_grad);
-            if (i < num_layers - 1) delete current_grad;
+            if (i < static_cast<int>(layers.size()) - 1) delete current_grad;
             current_grad = next_grad;
         }
         delete current_grad;
+        return nullptr;
     }
 
-    void update(float lr) {
-        for(int i = 0; i < num_layers; ++i) layers[i]->update(lr);
+    void update(float lr) override {
+        for (size_t i = 0; i < layers.size(); ++i) {
+            layers[i]->update(lr);
+        }
     }
 };
 
-#endif /* SRC_ENGINE_LAYERS_HPP_ */
+} // namespace engine
+
+#endif // ENGINE_LAYERS_HPP_

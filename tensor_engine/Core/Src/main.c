@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "string.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -30,7 +31,9 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef struct {
+    PredictorHandle handle;
+} AdvancedPowerPredictor;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -55,6 +58,13 @@ UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -65,12 +75,39 @@ static void MX_GPIO_Init(void);
 static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 extern UART_HandleTypeDef huart3;
 
 int __io_putchar(int ch) {
 	HAL_UART_Transmit(&huart3, (uint8_t*) &ch, 1, HAL_MAX_DELAY);
 	return ch;
+}
+
+AdvancedPowerPredictor create_advanced_power_predictor(void) {
+    AdvancedPowerPredictor predictor;
+    predictor.handle = create_predictor();
+    // Layer 1: INT8 weights (Quantized int8 storage)
+    predictor_add_layer(predictor.handle, create_linear_layer_with_dtype(5, 32, 0));
+    predictor_add_layer(predictor.handle, create_batchnorm1d_layer(32, 1e-5f, 0.1f));
+    predictor_add_layer(predictor.handle, create_leaky_relu_layer(0.1f));
+    predictor_add_layer(predictor.handle, create_dropout_layer(0.2f));
+    // Layer 2: FLOAT16 weights (Half precision IEEE 754 storage)
+    predictor_add_layer(predictor.handle, create_linear_layer_with_dtype(32, 16, 3));
+    predictor_add_layer(predictor.handle, create_batchnorm1d_layer(16, 1e-5f, 0.1f));
+    predictor_add_layer(predictor.handle, create_leaky_relu_layer(0.1f));
+    predictor_add_layer(predictor.handle, create_dropout_layer(0.2f));
+    // Layer 3: FLOAT32 weights (Full precision single storage)
+    predictor_add_layer(predictor.handle, create_linear_layer_with_dtype(16, 1, 4));
+    return predictor;
+}
+
+void destroy_advanced_power_predictor(AdvancedPowerPredictor* predictor) {
+    if (predictor && predictor->handle) {
+        destroy_predictor(predictor->handle);
+        predictor->handle = NULL;
+    }
 }
 /* USER CODE END PFP */
 
@@ -116,76 +153,184 @@ int main(void)
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
 
-  printf("\r\n=========================================\r\n");
-  printf("--- STM32 Edge Training Initiated ---\r\n");
-  printf("=========================================\r\n\r\n");
+  printf("\r\n");
+  printf("+------------------------------------------------------------------+\r\n");
+  printf("|                STM32 EDGE TENSOR ENGINE BENCHMARK                |\r\n");
+  printf("|        Architecture: ARM Cortex-M4 @ 180MHz (STM32F429ZI)        |\r\n");
+  printf("|        Quantization: INT8  |  Half-FP: FLOAT16  |  FP32          |\r\n");
+  printf("+------------------------------------------------------------------+\r\n\r\n");
 
-  // Dynamic allocation for 60 procedural data points
-  float* inputs = (float*)malloc(NUM_DATAPOINTS * INPUT_DIM * sizeof(float));
-  float* targets = (float*)malloc(NUM_DATAPOINTS * sizeof(float));
+  uint32_t cpu_time_ms = 0;
+  uint32_t cmsis_time_ms = 0;
+  float cpu_final_loss = 0.0f;
+  float cmsis_final_loss = 0.0f;
+  float cpu_prediction = 0.0f;
+  float cmsis_prediction = 0.0f;
 
-  if (!inputs || !targets) {
+  // =========================================================================
+  // PASS 1: Training WITHOUT CMSIS-NN Acceleration (Standard CPU Fallback)
+  // =========================================================================
+  set_cmsis_nn_acceleration_enabled(0);
+  srand(42);
+
+  float* inputs1 = (float*)malloc(NUM_DATAPOINTS * INPUT_DIM * sizeof(float));
+  float* targets1 = (float*)malloc(NUM_DATAPOINTS * sizeof(float));
+  if (!inputs1 || !targets1) {
       printf("CRITICAL ERROR: Memory allocation failed!\r\n");
       while(1);
   }
 
-  // Procedural Data Generation: Simulating continuous power metrics
   for (int i = 0; i < NUM_DATAPOINTS; i++) {
-      inputs[i * INPUT_DIM + 0] = (float)(i % 365) / 365.0f;       // DOY normalized
-      inputs[i * INPUT_DIM + 1] = (float)(i % 7) / 7.0f;           // DOW normalized
-      inputs[i * INPUT_DIM + 2] = (float)(rand() % 100) / 100.0f;  // Past 7-Day Average
-      inputs[i * INPUT_DIM + 3] = 0.5f;                            // Sparse feature padding
-      inputs[i * INPUT_DIM + 4] = 0.5f;                            // Sparse feature padding
-
-      // Target synthesis using arbitrary regression logic alongside stochastic noise
-      targets[i] = (inputs[i * INPUT_DIM + 0] * 0.4f) +
-                   (inputs[i * INPUT_DIM + 2] * 0.6f) +
-                   ((float)rand() / (float)RAND_MAX * 0.05f);
+      inputs1[i * INPUT_DIM + 0] = (float)(i % 365) / 365.0f;
+      inputs1[i * INPUT_DIM + 1] = (float)(i % 7) / 7.0f;
+      inputs1[i * INPUT_DIM + 2] = (float)(rand() % 100) / 100.0f;
+      inputs1[i * INPUT_DIM + 3] = 0.5f;
+      inputs1[i * INPUT_DIM + 4] = 0.5f;
+      targets1[i] = (inputs1[i * INPUT_DIM + 0] * 0.4f) +
+                    (inputs1[i * INPUT_DIM + 2] * 0.6f) +
+                    ((float)rand() / (float)RAND_MAX * 0.05f);
   }
 
-  // Instantiation of the encapsulated C++ Neural Network
-  PredictorHandle model = create_predictor();
+  AdvancedPowerPredictor predictor_cpu = create_advanced_power_predictor();
 
-  printf("Model successfully initialized.\r\n");
-    printf("Commencing training matrix...\r\n");
-    printf("-----------------------------------------\r\n");
+  printf("+-- [PASS 1] Standard CPU Reference Backend (No Acceleration) -----+\r\n");
 
-    // Primary Training Loop
-    for (int epoch = 1; epoch <= EPOCHS; epoch++) {
-        float loss = train_step(model, inputs, targets, NUM_DATAPOINTS, LEARNING_RATE);
+  uint32_t t_start_cpu = HAL_GetTick();
+  for (int epoch = 1; epoch <= EPOCHS; epoch++) {
+      cpu_final_loss = train_step(predictor_cpu.handle, inputs1, targets1, NUM_DATAPOINTS, LEARNING_RATE);
+      if (epoch % 20 == 0 || epoch == EPOCHS) {
+          int loss_int = (int)cpu_final_loss;
+          int loss_frac = (int)((cpu_final_loss - loss_int) * 10000);
+          printf("|  Epoch [%3d/%3d]  ------>  MSE Loss: %d.%04d                     |\r\n", epoch, EPOCHS, loss_int, loss_frac);
+      }
+  }
+  cpu_time_ms = HAL_GetTick() - t_start_cpu;
 
-        // Print exactly at every 10th epoch
-        if (epoch % 10 == 0) {
-            int loss_int = (int)loss;
-            int loss_frac = (int)((loss - loss_int) * 10000);
-            printf("Epoch: [%3d/%3d] | MSE Loss: %d.%04d\r\n", epoch, EPOCHS, loss_int, loss_frac);
-        }
-    }
+  float test_input1[INPUT_DIM];
+  for(int i = 0; i < INPUT_DIM; i++) test_input1[i] = inputs1[i];
+  cpu_prediction = predict(predictor_cpu.handle, test_input1);
 
-    printf("-----------------------------------------\r\n");
-    printf("--- Embedded Training Protocol Complete ---\r\n\r\n");
-  // Execute Inference Check on initial sample vector
-  float test_input[INPUT_DIM];
-  for(int i = 0; i < INPUT_DIM; i++) test_input[i] = inputs[i];
+  int cpred_i = (int)cpu_prediction;
+  int cpred_f = (int)((cpu_prediction - cpred_i) * 10000);
+  int truth_i = (int)targets1[0];
+  int truth_f = (int)((targets1[0] - truth_i) * 10000);
+  printf("|  Execution Time   : %4lu ms                                      |\r\n", (unsigned long)cpu_time_ms);
+  printf("|  Test Prediction  : %d.%04d (Ground Truth: %d.%04d)              |\r\n", cpred_i, cpred_f, truth_i, truth_f);
+  printf("+------------------------------------------------------------------+\r\n\r\n");
 
-  float prediction = predict(model, test_input);
+  destroy_advanced_power_predictor(&predictor_cpu);
+  free(inputs1);
+  free(targets1);
 
-  // Format predictions and targets
-  int pred_int = (int)prediction;
-  int pred_frac = (int)((prediction - pred_int) * 10000);
-  int truth_int = (int)targets[0];
-  int truth_frac = (int)((targets[0] - truth_int) * 10000);
+  // =========================================================================
+  // PASS 2: Training WITH CMSIS-NN Acceleration (ARM Cortex-M SIMD/DSP)
+  // =========================================================================
+  set_cmsis_nn_acceleration_enabled(1);
+  srand(42);
 
-  printf("Test Prediction: %d.%04d\r\n", pred_int, pred_frac);
-  printf("Ground Truth:    %d.%04d\r\n", truth_int, truth_frac);
-  printf("\r\n=========================================\r\n");
+  float* inputs2 = (float*)malloc(NUM_DATAPOINTS * INPUT_DIM * sizeof(float));
+  float* targets2 = (float*)malloc(NUM_DATAPOINTS * sizeof(float));
+  if (!inputs2 || !targets2) {
+      printf("CRITICAL ERROR: Memory allocation failed!\r\n");
+      while(1);
+  }
 
-  // Mandatory teardown to prevent embedded memory leaks
-  destroy_predictor(model);
-  free(inputs);
-  free(targets);
+  for (int i = 0; i < NUM_DATAPOINTS; i++) {
+      inputs2[i * INPUT_DIM + 0] = (float)(i % 365) / 365.0f;
+      inputs2[i * INPUT_DIM + 1] = (float)(i % 7) / 7.0f;
+      inputs2[i * INPUT_DIM + 2] = (float)(rand() % 100) / 100.0f;
+      inputs2[i * INPUT_DIM + 3] = 0.5f;
+      inputs2[i * INPUT_DIM + 4] = 0.5f;
+      targets2[i] = (inputs2[i * INPUT_DIM + 0] * 0.4f) +
+                    (inputs2[i * INPUT_DIM + 2] * 0.6f) +
+                    ((float)rand() / (float)RAND_MAX * 0.05f);
+  }
+
+  AdvancedPowerPredictor predictor_cmsis = create_advanced_power_predictor();
+
+  printf("+-- [PASS 2] ARM CMSIS-NN Hardware Acceleration Backend (SIMD) ----+\r\n");
+
+  uint32_t t_start_cmsis = HAL_GetTick();
+  for (int epoch = 1; epoch <= EPOCHS; epoch++) {
+      cmsis_final_loss = train_step(predictor_cmsis.handle, inputs2, targets2, NUM_DATAPOINTS, LEARNING_RATE);
+      if (epoch % 20 == 0 || epoch == EPOCHS) {
+          int loss_int = (int)cmsis_final_loss;
+          int loss_frac = (int)((cmsis_final_loss - loss_int) * 10000);
+          printf("|  Epoch [%3d/%3d]  ------>  MSE Loss: %d.%04d                     |\r\n", epoch, EPOCHS, loss_int, loss_frac);
+      }
+  }
+  cmsis_time_ms = HAL_GetTick() - t_start_cmsis;
+
+  float test_input2[INPUT_DIM];
+  for(int i = 0; i < INPUT_DIM; i++) test_input2[i] = inputs2[i];
+  cmsis_prediction = predict(predictor_cmsis.handle, test_input2);
+
+  int npred_i = (int)cmsis_prediction;
+  int npred_f = (int)((cmsis_prediction - npred_i) * 10000);
+  printf("|  Execution Time   : %4lu ms                                      |\r\n", (unsigned long)cmsis_time_ms);
+  printf("|  Test Prediction  : %d.%04d (Ground Truth: %d.%04d)              |\r\n", npred_i, npred_f, truth_i, truth_f);
+  printf("+------------------------------------------------------------------+\r\n\r\n");
+
+  destroy_advanced_power_predictor(&predictor_cmsis);
+  free(inputs2);
+  free(targets2);
+
+  // =========================================================================
+  // BENCHMARK COMPARISON REPORT
+  // =========================================================================
+  printf("+------------------------------------------------------------------+\r\n");
+  printf("|                   BENCHMARK EXECUTION SUMMARY                    |\r\n");
+  printf("+----------------------+-+--------------+-+--------------+-+-------+\r\n");
+  printf("| Backend Mode         | | Exec Time    | | Final MSE    | | Output|\r\n");
+  printf("+----------------------+-+--------------+-+--------------+-+-------+\r\n");
+
+  int closs_i = (int)cpu_final_loss;
+  int closs_f = (int)((cpu_final_loss - closs_i) * 10000);
+  printf("| CPU Reference        | | %4lu ms       | | %d.%04d       | | %d.%04d|\r\n", (unsigned long)cpu_time_ms, closs_i, closs_f, cpred_i, cpred_f);
+
+  int nloss_i = (int)cmsis_final_loss;
+  int nloss_f = (int)((cmsis_final_loss - nloss_i) * 10000);
+  printf("| CMSIS-NN Accelerated | | %4lu ms       | | %d.%04d       | | %d.%04d|\r\n", (unsigned long)cmsis_time_ms, nloss_i, nloss_f, npred_i, npred_f);
+
+  printf("+----------------------+-+--------------+-+--------------+-+-------+\r\n\r\n");
 
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -420,6 +565,46 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM7 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM7)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
