@@ -14,6 +14,12 @@ using backend::apply_leaky_relu;
 using backend::leaky_relu_backward;
 using backend::apply_dropout;
 using backend::dropout_backward;
+using backend::apply_tanh;
+using backend::tanh_backward;
+using backend::apply_exp;
+using backend::exp_backward;
+using backend::apply_softmax;
+using backend::softmax_backward;
 
 } // namespace engine
 

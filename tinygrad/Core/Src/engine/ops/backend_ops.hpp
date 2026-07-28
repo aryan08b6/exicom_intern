@@ -189,6 +189,77 @@ inline void dropout_backward(const Matrix* dY, const Matrix* mask, Matrix* dX) {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Tanh, Exp, and Softmax Kernels
+// ----------------------------------------------------------------------------
+
+inline void apply_tanh(const Matrix* input, Matrix* output) {
+    int total = input->rows * input->cols;
+    for (int i = 0; i < total; ++i) {
+        output->data[i] = std::tanh(input->data[i]);
+    }
+}
+
+inline void tanh_backward(const Matrix* dY, const Matrix* cached_output, Matrix* dX) {
+    int total = dY->rows * dY->cols;
+    for (int i = 0; i < total; ++i) {
+        float y = cached_output->data[i];
+        dX->data[i] = dY->data[i] * (1.0f - y * y);
+    }
+}
+
+inline void apply_exp(const Matrix* input, Matrix* output) {
+    int total = input->rows * input->cols;
+    for (int i = 0; i < total; ++i) {
+        output->data[i] = std::exp(input->data[i]);
+    }
+}
+
+inline void exp_backward(const Matrix* dY, const Matrix* cached_output, Matrix* dX) {
+    int total = dY->rows * dY->cols;
+    for (int i = 0; i < total; ++i) {
+        dX->data[i] = dY->data[i] * cached_output->data[i];
+    }
+}
+
+inline void apply_softmax(const Matrix* input, Matrix* output) {
+    int rows = input->rows;
+    int cols = input->cols;
+    for (int r = 0; r < rows; ++r) {
+        float max_val = input->get(r, 0);
+        for (int c = 1; c < cols; ++c) {
+            float val = input->get(r, c);
+            if (val > max_val) max_val = val;
+        }
+        float sum = 0.0f;
+        for (int c = 0; c < cols; ++c) {
+            float exp_val = std::exp(input->get(r, c) - max_val);
+            output->set(r, c, exp_val);
+            sum += exp_val;
+        }
+        float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 1.0f;
+        for (int c = 0; c < cols; ++c) {
+            output->set(r, c, output->get(r, c) * inv_sum);
+        }
+    }
+}
+
+inline void softmax_backward(const Matrix* dY, const Matrix* cached_output, Matrix* dX) {
+    int rows = dY->rows;
+    int cols = dY->cols;
+    for (int r = 0; r < rows; ++r) {
+        float dot = 0.0f;
+        for (int c = 0; c < cols; ++c) {
+            dot += dY->get(r, c) * cached_output->get(r, c);
+        }
+        for (int c = 0; c < cols; ++c) {
+            float y = cached_output->get(r, c);
+            float grad = dY->get(r, c);
+            dX->set(r, c, y * (grad - dot));
+        }
+    }
+}
+
 } // namespace backend
 } // namespace engine
 

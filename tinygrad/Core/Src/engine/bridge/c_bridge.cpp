@@ -50,6 +50,18 @@ LayerHandle create_dropout_layer(float p) {
     return new DropoutLayer(p);
 }
 
+LayerHandle create_tanh_layer(void) {
+    return new TanhLayer();
+}
+
+LayerHandle create_exp_layer(void) {
+    return new ExpLayer();
+}
+
+LayerHandle create_softmax_layer(void) {
+    return new SoftmaxLayer();
+}
+
 void destroy_layer(LayerHandle layer) {
     if (layer) {
         delete static_cast<Layer*>(layer);

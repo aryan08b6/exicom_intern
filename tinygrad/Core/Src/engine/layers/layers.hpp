@@ -278,6 +278,90 @@ public:
     void update(float lr) override {}
 };
 
+class TanhLayer : public Layer {
+private:
+    Matrix* cached_output;
+
+public:
+    TanhLayer() : cached_output(nullptr) {}
+    ~TanhLayer() override { if (cached_output) delete cached_output; }
+
+    Matrix* forward(Matrix* input, bool training) override {
+        Matrix* output = new Matrix(input->rows, input->cols);
+        apply_tanh(input, output);
+        if (training) {
+            if (cached_output) delete cached_output;
+            cached_output = new Matrix(input->rows, input->cols);
+            memcpy(cached_output->data, output->data, input->rows * input->cols * sizeof(float));
+        }
+        return output;
+    }
+
+    Matrix* backward(Matrix* dY) override {
+        Matrix* dX = new Matrix(dY->rows, dY->cols);
+        tanh_backward(dY, cached_output, dX);
+        return dX;
+    }
+
+    void update(float lr) override {}
+};
+
+class ExpLayer : public Layer {
+private:
+    Matrix* cached_output;
+
+public:
+    ExpLayer() : cached_output(nullptr) {}
+    ~ExpLayer() override { if (cached_output) delete cached_output; }
+
+    Matrix* forward(Matrix* input, bool training) override {
+        Matrix* output = new Matrix(input->rows, input->cols);
+        apply_exp(input, output);
+        if (training) {
+            if (cached_output) delete cached_output;
+            cached_output = new Matrix(input->rows, input->cols);
+            memcpy(cached_output->data, output->data, input->rows * input->cols * sizeof(float));
+        }
+        return output;
+    }
+
+    Matrix* backward(Matrix* dY) override {
+        Matrix* dX = new Matrix(dY->rows, dY->cols);
+        exp_backward(dY, cached_output, dX);
+        return dX;
+    }
+
+    void update(float lr) override {}
+};
+
+class SoftmaxLayer : public Layer {
+private:
+    Matrix* cached_output;
+
+public:
+    SoftmaxLayer() : cached_output(nullptr) {}
+    ~SoftmaxLayer() override { if (cached_output) delete cached_output; }
+
+    Matrix* forward(Matrix* input, bool training) override {
+        Matrix* output = new Matrix(input->rows, input->cols);
+        apply_softmax(input, output);
+        if (training) {
+            if (cached_output) delete cached_output;
+            cached_output = new Matrix(input->rows, input->cols);
+            memcpy(cached_output->data, output->data, input->rows * input->cols * sizeof(float));
+        }
+        return output;
+    }
+
+    Matrix* backward(Matrix* dY) override {
+        Matrix* dX = new Matrix(dY->rows, dY->cols);
+        softmax_backward(dY, cached_output, dX);
+        return dX;
+    }
+
+    void update(float lr) override {}
+};
+
 // Sequential container layer (Needle framework style)
 class SequentialLayer : public Layer {
 private:

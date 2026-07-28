@@ -20,6 +20,9 @@ LayerHandle create_linear_layer_with_dtype(int in_features, int out_features, in
 LayerHandle create_batchnorm1d_layer(int num_features, float eps, float momentum);
 LayerHandle create_leaky_relu_layer(float alpha);
 LayerHandle create_dropout_layer(float p);
+LayerHandle create_tanh_layer(void);
+LayerHandle create_exp_layer(void);
+LayerHandle create_softmax_layer(void);
 void destroy_layer(LayerHandle layer);
 
 // Executes one comprehensive training pass and returns Loss
